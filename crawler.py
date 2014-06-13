@@ -28,6 +28,7 @@ def parse_args():
     parser.add_argument("-u", "--url", help="The seed URL to scheduler crawling")
     parser.add_argument("-p", "--parallel", default=500, help="Specifies how many pages you want to crawl in parallel. Default = 500")
     parser.add_argument("-d", "--depth", default=1, help="Specifies how many levels deep you want to crawl")
+    parser.add_argument("-f", "--filter", help="Ignore link if it contains the characters in this argument. Ex: -f 'blog.google.com'")
     return parser.parse_args()
 
 class Crawler:
@@ -51,8 +52,12 @@ class Crawler:
         self.data_q = gevent.queue.Queue() # Place data from finished net conn here to get processed
         self.links_found = [] # Non-duplicate links found within the current depth level
         self.base_url = args.url
+        self.filter = args.filter
         self.all_links = {} # All links found both crawled and uncrawled organized by depth
         print 'base url: ', args.url
+
+        self.filtered = 0
+        self.start_time = time.time()
 
         # Add the seed link to the list that gets put in the queue and add it to all_links
         self.run()
@@ -103,14 +108,17 @@ class Crawler:
                 break
 
         if len(self.all_links[self.cur_depth+1]) == 0:
-            self.logger.info('No links in next depth level. Current depth: %d' % self.cur_depth)
-            sys.exit('[-] No more unique links found. Current depth: %d' % self.cur_depth)
+            self.logger.info('[-] No more unique links found. Current depth: %d, total links: %d' % (self.cur_depth, self.total_links()))
+            total = self.total_links()
+            #sys.exit('[-] No more unique links found. Current depth: %d, total links: %d' % (self.cur_depth, self.total_links()))
+            sys.exit('All links: %d, Filtered: %d, percent filtered: %f, Runtime: %s' % (total, self.filtered, float(self.filtered)/float(total), str(time.time() - self.start_time)))
         elif self.cur_depth < self.end_depth:
             self.scheduler()
         else:
             total = self.total_links()
             print 'Total links:', total
-            sys.exit('\n[-] Hit max depth: %d' % self.cur_depth)
+            print '\n[-] Hit max depth: %d' % self.cur_depth
+            sys.exit('All links: %d, Filtered: %d, percent filtered: %f, Runtime: %s' % (total, self.filtered, float(self.filtered)/float(total), str(time.time() - self.start_time)))
 
     def total_links(self):
         '''
@@ -137,7 +145,7 @@ class Crawler:
         '''
         try:
             url = self.net_q.get()
-            resp = requests.get(url, headers = {'User-Agent':self.get_user_agent()})
+            resp = requests.get(url, headers = {'User-Agent':self.get_user_agent()}, timeout=30)
             html = resp.content
             if '/' == resp.url[:-1]:
                 post_redirect_url = resp.url[:-1] # this gets the url in case of redirect and strips the last '/'
@@ -222,41 +230,53 @@ class Crawler:
         if len(link) > 0:
             # Filter out pages that aren't going to have links on them. Hacky.
             for ext in link_exts:
-                if ext in link[-4:]:
-                    self.logger.debug('- Filtered: '+link)
+                if link.endswith(ext):
+                    self.logger.debug('Filtered: '+link)
+                    self.filtered +=1
                     return
             # Don't add links to scheduler with # since they're just JS or an anchor
-            if '#' == link[0]:
-                self.logger.debug('- Filtered: '+link)
+            if link.startswith('#'):
+                self.logger.debug('Filtered: '+link)
+                self.filtered +=1
                 return
-            # Handle links like /articles/hello.html
-            elif '/' == link[0]:
-                link = parent_hostname+link.decode('utf-8')
-                self.logger.debug('+ Appended: '+link)
-                return link
+            # Handle links like /articles/hello.html but not //:
+            elif link.startswith('/') and ':' not in link:
+                try:
+                    link = parent_hostname+link.decode('utf-8')
+                except Exception:
+                    self.logger.error('Unicode error probably')
+                    self.filtered +=1
+                    return
+                self.logger.debug('Appended: '+link)
             # Ignore links that are simple "http://"
             elif 'http://' == link.lower():
-                self.logger.debug('- Filtered: '+link)
+                self.logger.debug('Filtered: '+link)
+                self.filtered +=1
                 return
             # Handle full URL links
-            elif 'http' == link[:4].lower():
+            elif link.lower().startswith('http'):
                 link_hostname = urlparse(link).hostname
                 if not link_hostname:
                     self.logger.error('Failed to get the hostname from this link: %s' % link)
                     return
                 if self.root_domain in link_hostname:
-                    self.logger.debug('+ Appended: '+link)
-                    return link
-            # Ignore links that don't scheduler with http but still have : like android-app://com.tumblr
+                    self.logger.debug('Appended: '+link)
+                else:
+                    self.logger.debug('Filtered: '+link)
+                    self.filtered +=1
+                    return
+            # Ignore links that don't start with http but still have : like android-app://com.tumblr
             # or javascript:something
             elif ':' in link:
-                self.logger.debug('- Filtered: '+link)
+                self.logger.debug('Filtered due to colon: '+link)
+                self.filtered +=1
                 return
             # Catch all unhandled URLs like "about/me.html" will go here
             else:
                 link = parent_hostname+'/'+link
-                self.logger.debug('+ Appended: '+link)
-                return link
+                self.logger.debug('Appended: '+link)
+
+            return link
 
     def get_unique_links(self, link):
         '''
@@ -303,7 +323,7 @@ class Crawler:
         Shutdown functions
         '''
         total = self.total_links()
-        print '[+] All unique links found on *.%s: %d' % ('.'.join(self.hostname.split('.')[-2:]), total)
-        sys.exit('[*] Finished')
+        #sys.exit('All links: %d, Filtered: %d, percent filtered: %f' % (total, self.filtered, float(self.filtered)/float(total)))
+        sys.exit('All links: %d, Filtered: %d, percent filtered: %f, Runtime: %s' % (total, self.filtered, float(self.filtered)/float(total), str(time.time() - self.start_time)))
 
 C = Crawler(parse_args())
